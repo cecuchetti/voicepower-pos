@@ -12,6 +12,9 @@ from server.config import config
 import soundfile as sf
 from server.services.speech_recognition.base import SpeechRecognitionService
 from server.services.speech_recognition.vosk_service import VoskService
+import wave
+import tempfile
+import os
 
 # Configure logging
 logging.basicConfig(
@@ -103,17 +106,48 @@ class AudioProcessor:
             return True
         return False
 
+    async def _process_audio_stream(self, stream) -> str:
+        """Process the audio stream and return recognized text."""
+        async def audio_generator():
+            while True:
+                try:
+                    data = await asyncio.wait_for(self.audio_queue.get(), timeout=1.0)
+                    yield data
+                except asyncio.TimeoutError:
+                    if time.time() - self.last_text_time > self.config.timeout:
+                        print(f"No text recognized for {self.config.timeout} seconds, stopping...")
+                        break
+                    continue
+
+        text_buffer = []
+        last_log_time = time.time()
+        
+        async for result in self.speech_service.process_audio_stream(audio_generator()):
+            current_time = time.time()
+            
+            if result["has_voice_activity"]:
+                self.last_text_time = current_time
+            
+            if result["text"]:
+                print(f"Recognized text: {result['text']}")
+                text_buffer.append(result["text"])
+            elif current_time - last_log_time > 5:
+                print("Listening...")
+                last_log_time = current_time
+            
+            if current_time - self.last_text_time > self.config.timeout:
+                print(f"No voice activity for {self.config.timeout} seconds, stopping...")
+                break
+        
+        return " ".join(text_buffer)
+
     async def process_audio(self) -> str:
         """Process audio from microphone."""
         stream = None
-        last_log_time = time.time()
-        self.last_text_time = time.time()  # Reiniciar el tiempo al comenzar
-        
         try:
             await self.speech_service.initialize()
             print("Audio processing started. Speak into the microphone...")
             
-            # Set up audio stream
             stream = sd.RawInputStream(
                 samplerate=self.config.samplerate,
                 blocksize=self.config.blocksize,
@@ -124,43 +158,7 @@ class AudioProcessor:
             )
             stream.start()
             
-            async def audio_generator():
-                while True:
-                    try:
-                        data = await asyncio.wait_for(
-                            self.audio_queue.get(), 
-                            timeout=1.0
-                        )
-                        yield data
-                    except asyncio.TimeoutError:
-                        current_time = time.time()
-                        if current_time - self.last_text_time > self.config.timeout:
-                            print(f"No text recognized for {self.config.timeout} seconds, stopping...")
-                            break
-                        continue
-            
-            # Process audio stream
-            async for result in self.speech_service.process_audio_stream(audio_generator()):
-                current_time = time.time()
-                
-                # Actualizar el tiempo si hay actividad de voz
-                if result["has_voice_activity"]:
-                    self.last_text_time = current_time
-                
-                # Agregar texto si existe
-                if result["text"]:
-                    print(f"Recognized text: {result['text']}")
-                    self.text_buffer.append(result["text"])
-                elif current_time - last_log_time > 5:
-                    print("Listening...")
-                    last_log_time = current_time
-                
-                # Verificar timeout
-                if current_time - self.last_text_time > self.config.timeout:
-                    print(f"No voice activity for {self.config.timeout} seconds, stopping...")
-                    break
-            
-            return " ".join(self.text_buffer)
+            return await self._process_audio_stream(stream)
             
         finally:
             if stream and stream.active:
@@ -176,6 +174,113 @@ class AudioProcessor:
             return text
         finally:
             await self.speech_service.shutdown()
+
+    async def record_audio(self, duration: int = 10) -> str:
+        """
+        Record audio from microphone and save it to a WAV file.
+        
+        Args:
+            duration: Recording duration in seconds
+            
+        Returns:
+            str: Path to the recorded audio file
+        """
+        try:
+            # Configurar el stream de grabación
+            recording = []
+            
+            def callback(indata, frames, time, status):
+                if status:
+                    print(f"Status: {status}")
+                recording.append(indata.copy())
+            
+            # Configurar y iniciar la grabación
+            stream = sd.InputStream(
+                samplerate=self.config.samplerate,
+                blocksize=self.config.blocksize,
+                device=self.config.device,
+                channels=self.config.channels,
+                dtype='int16',
+                callback=callback
+            )
+            
+            print(f"Recording for {duration} seconds...")
+            with stream:
+                sd.sleep(duration * 1000)  # Convertir a milisegundos
+            
+            # Convertir la grabación a un array numpy
+            recorded_data = np.concatenate(recording, axis=0)
+            
+            # Crear un archivo temporal
+            temp_dir = tempfile.gettempdir()
+            temp_file = os.path.join(temp_dir, f"recording_{int(time.time())}.wav")
+            
+            # Guardar como archivo WAV
+            with wave.open(temp_file, 'wb') as wf:
+                wf.setnchannels(self.config.channels)
+                wf.setsampwidth(2)  # 16 bits = 2 bytes
+                wf.setframerate(self.config.samplerate)
+                wf.writeframes(recorded_data.tobytes())
+            
+            print(f"Audio saved to: {temp_file}")
+            return temp_file
+            
+        except Exception as e:
+            print(f"Error recording audio: {e}")
+            raise AudioProcessingError(f"Error recording audio: {e}")
+
+    async def process_audio_file_to_text(self, file_path: str) -> str:
+        """
+        Process an audio file and return the complete recognized text.
+        
+        Args:
+            file_path: Path to the audio file to process
+            
+        Returns:
+            str: Complete recognized text from the audio file
+        """
+        try:
+            # Leer el archivo de audio
+            audio_data, sample_rate = sf.read(file_path)
+            
+            # Asegurarse de que el audio esté en el formato correcto
+            if sample_rate != self.config.samplerate:
+                print(f"Resampling audio from {sample_rate} to {self.config.samplerate}")
+                # TODO: Implementar resampling si es necesario
+                
+            if audio_data.dtype != np.int16:
+                audio_data = (audio_data * 32767).astype(np.int16)
+            
+            # Inicializar el servicio de reconocimiento
+            await self.speech_service.initialize()
+            
+            try:
+                # Procesar el audio en chunks
+                chunk_size = self.config.blocksize * self.config.channels
+                text_buffer = []
+                
+                async def audio_chunks():
+                    for i in range(0, len(audio_data), chunk_size):
+                        chunk = audio_data[i:i + chunk_size]
+                        if len(chunk) < chunk_size:
+                            # Rellenar el último chunk si es necesario
+                            chunk = np.pad(chunk, (0, chunk_size - len(chunk)))
+                        yield chunk.tobytes()
+                
+                # Procesar el audio
+                async for result in self.speech_service.process_audio_stream(audio_chunks()):
+                    if result["text"]:
+                        text_buffer.append(result["text"])
+                
+                return " ".join(text_buffer)
+                
+            finally:
+                await self.speech_service.shutdown()
+                
+        except Exception as e:
+            error_msg = f"Error processing audio file: {e}"
+            print(error_msg)
+            raise AudioProcessingError(error_msg)
 
 # Example usage:
 if __name__ == "__main__":

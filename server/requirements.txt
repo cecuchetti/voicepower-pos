@@ -11,4 +11,7 @@ python-multipart  # For handling file uploads
 soundfile  # For reading audio files
 deepseek  # Assuming this is a Python package; replace with the correct package name if different
 langchain  # For structuring prompts and text generation
-soundfile  
+sqlalchemy
+aiosqlite  # Para soporte async con SQLite
+openai
+python-dotenv  # Para manejar las variables de entorno  

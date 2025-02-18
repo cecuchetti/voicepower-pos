@@ -50,3 +50,23 @@ This is a **proof of concept** for a voice-controlled point-of-sale (POS) system
 ```bash
 git clone https://github.com/yourusername/voice-pos.git
 cd voice-pos
+```
+
+### 2️⃣ Backend Setup
+```bash
+cd server
+python -m venv venv
+source venv/bin/activate  # En Windows: .\venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn server.app:app --reload
+```
+
+### 3️⃣ Frontend Setup
+```bash
+cd frontend
+npm install
+npm start
+```
+
+La aplicación estará disponible en http://localhost:3000
+```bash

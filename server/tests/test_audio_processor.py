@@ -14,7 +14,7 @@ async def main():
             device=None,
             samplerate=16000,
             language='es',
-            timeout=10  # Reducir el timeout para pruebas
+            timeout=10  # Reduced timeout for testing
         )
         
         # Create audio processor with the configuration
