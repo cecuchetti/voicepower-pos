@@ -12,7 +12,7 @@ from server.database.models import Product as ProductModel, Sale as SaleModel, S
 from server.schemas import Product, ProductCreate, Sale, SaleCreate, CartItemCreate, CartItem, Cart
 from server.audio_processor import AudioProcessor, AudioConfig, AudioProcessingError
 from server.config import config
-from server.services.llm.openai_service import OpenAIService
+from server.services.llm.factory import LLMServiceFactory
 from datetime import datetime
 from server.services.image_service import ImageService
 
@@ -283,8 +283,8 @@ async def process_audio_to_cart(
         print(f"Texto reconocido: {text}")
         
         # Convertir texto a lista de compras
-        openai_service = OpenAIService()
-        shopping_list = await openai_service.text_to_shopping_list(text + " con precios que debes inventar")
+        llm_service = LLMServiceFactory.create("openai")
+        shopping_list = await llm_service.text_to_shopping_list(text + " con precios que debes inventar")
         print(f"Lista de compras procesada: {shopping_list}")
         
         if not shopping_list or not isinstance(shopping_list, list):
